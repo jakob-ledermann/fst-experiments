@@ -1,0 +1,19 @@
+[package]
+name = "fst-experiments"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+fst = "0.4.7"
+tempfile = "3.3.0"
+tracing = "0.1.36"
+tracing-subscriber = "0.3.15"
+
+[[bin]]
+name = "sort"
+path = "src/sort.rs"
+
+[profile.release]
+debug = true
