@@ -11,7 +11,7 @@ use tracing::info;
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let input_file = std::fs::File::open("pwned-passwords-sha1-ordered-by-count-v8.txt")
+    let input_file = std::fs::File::open("pwned-passwords-sha1-ordered-by-count-v8.part.txt")
         .expect("Could not open input file.");
 
     let reader = BufReader::new(input_file);
@@ -42,7 +42,6 @@ fn split_into_sorted_runs(
     source: impl BufRead + std::io::Seek,
     folder: &Path,
 ) -> Vec<NamedTempFile> {
-    let mut buffer = BinaryHeap::with_capacity(4096 * 1024);
     let mut waiting_buffer = Vec::with_capacity(4096 * 1024);
     let mut run_count = 1;
     let mut result = Vec::new();
@@ -52,72 +51,31 @@ fn split_into_sorted_runs(
     let mut iterator = source.lines();
     let mut input_file_empty = false;
 
-    loop {
-        while !input_file_empty && buffer.len() + waiting_buffer.len() < buffer.capacity() {
-            if let Some(Ok(line)) = iterator.next() {
-                if let Some(last_written) = last_written.take() {
-                    match last_written.cmp(&line) {
-                        Ordering::Less | Ordering::Equal => {
-                            buffer.push(Reverse(line));
-                        }
-                        Ordering::Greater => {
-                            waiting_buffer.push(line);
-                        }
-                    }
-                } else {
-                    buffer.push(Reverse(line));
-                };
-            } else {
-                input_file_empty = true;
-                info!(
-                    "The input file has been read fully. {} entries in buffer",
-                    buffer.len() + waiting_buffer.len()
-                );
-                break;
-            }
-        }
-
-        if let Some(content) = buffer.pop() {
-            out_file
-                .write_all(content.0.as_bytes())
-                .expect("Error writing into output_file");
-            out_file
-                .write_all(b"\n")
-                .expect("Error writing into output_file");
-            last_written = Some(content.0);
-        } else if waiting_buffer.len() == waiting_buffer.capacity() || input_file_empty {
-            info!("Run completed. {:?} remaining.", iterator.size_hint());
-            // next run
+    for line in iterator {
+        let line = line.unwrap();
+        if waiting_buffer.len() < waiting_buffer.capacity() {
+            waiting_buffer.push(line);
+        } else {
             run_count += 1;
-            let file = NamedTempFile::new_in(folder)
-                .expect(&format!("Could not create file for run {}", run_count));
-            let mut completed_file = std::mem::replace(&mut out_file, BufWriter::new(file));
-            {
-                completed_file
-                    .flush()
-                    .expect("Could not write contents to disk");
-                completed_file
-                    .rewind()
-                    .expect("Could not reset file position");
-                result.push(
-                    completed_file
-                        .into_inner()
-                        .expect("Could not unwrap BufWriter"),
-                );
+            let file = NamedTempFile::new_in(folder).unwrap();
+            let mut old_file = std::mem::replace(&mut out_file, BufWriter::new(file));
+            waiting_buffer.sort();
+            for element in waiting_buffer.drain(..) {
+                old_file.write_all(element.as_bytes()).unwrap();
+                old_file.write_all(b"\n").unwrap();
             }
-
-            buffer.extend(waiting_buffer.drain(..).map(Reverse));
-            last_written = None;
-
-            if buffer.is_empty() {
-                break;
-            }
-        } else if waiting_buffer.is_empty() {
-            info!("Finished processing the input");
-            // waiting buffer is empty
-            break;
+            old_file.flush().unwrap();
+            old_file.rewind().unwrap();
+            result.push(old_file.into_inner().unwrap());
         }
     }
+
+    waiting_buffer.sort();
+    for element in waiting_buffer {
+        out_file.write_all(element.as_bytes()).unwrap();
+        out_file.write_all(b"\n").unwrap();
+    }
+    out_file.flush().unwrap();
 
     out_file.rewind().expect("Could not reset the output");
     result.push(out_file.into_inner().expect("Could not unwrap BufWriter"));
