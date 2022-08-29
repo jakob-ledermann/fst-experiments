@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 use tracing::info;
 
 fn main() {
@@ -28,21 +28,17 @@ fn main() {
         runs.pop().expect("Should have at least one run")
     };
 
-    let (file, path) = final_file
+    let path = final_file
         .keep()
         .expect("Should be able to persist the final file");
-    drop(file);
-    std::fs::copy(&path, path.parent().unwrap().join("sorted-output.txt")).expect(&format!(
+    std::fs::copy(&path, "sorted-output.txt").expect(&format!(
         "Should have been able to copy the final file {} to the output",
         &path.display()
     ));
 }
 
-fn split_into_sorted_runs(
-    source: impl BufRead + std::io::Seek,
-    folder: &Path,
-) -> Vec<NamedTempFile> {
-    let mut waiting_buffer = Vec::with_capacity(4096 * 1024);
+fn split_into_sorted_runs(source: impl BufRead + std::io::Seek, folder: &Path) -> Vec<TempPath> {
+    let mut waiting_buffer = Vec::with_capacity(1024);
     let mut run_count = 1;
     let mut result = Vec::new();
     let out_file_path = NamedTempFile::new_in(folder).expect("Could not create run_file");
@@ -53,9 +49,9 @@ fn split_into_sorted_runs(
 
     for line in iterator {
         let line = line.unwrap();
-        if waiting_buffer.len() < waiting_buffer.capacity() {
-            waiting_buffer.push(line);
-        } else {
+        waiting_buffer.push(line);
+
+        if waiting_buffer.len() >= waiting_buffer.capacity() - 1 {
             run_count += 1;
             let file = NamedTempFile::new_in(folder).unwrap();
             let mut old_file = std::mem::replace(&mut out_file, BufWriter::new(file));
@@ -65,8 +61,7 @@ fn split_into_sorted_runs(
                 old_file.write_all(b"\n").unwrap();
             }
             old_file.flush().unwrap();
-            old_file.rewind().unwrap();
-            result.push(old_file.into_inner().unwrap());
+            result.push(old_file.into_inner().unwrap().into_temp_path());
         }
     }
 
@@ -77,8 +72,12 @@ fn split_into_sorted_runs(
     }
     out_file.flush().unwrap();
 
-    out_file.rewind().expect("Could not reset the output");
-    result.push(out_file.into_inner().expect("Could not unwrap BufWriter"));
+    result.push(
+        out_file
+            .into_inner()
+            .expect("Could not unwrap BufWriter")
+            .into_temp_path(),
+    );
     result
 }
 
@@ -107,7 +106,7 @@ impl<TKey: Ord, TValue> Ord for KeyedCmp<TKey, TValue> {
     }
 }
 
-fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> NamedTempFile {
+fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> TempPath {
     let out_file_path = NamedTempFile::new_in(target_folder).expect("Could not create target file");
 
     let mut out_file = out_file_path;
@@ -120,44 +119,56 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> NamedTempF
         })
         .collect();
 
-    let mut heap = BinaryHeap::with_capacity(sources.len());
+    let mut heap = Vec::with_capacity(sources.len());
 
     for (index, lines) in readers.iter_mut().enumerate() {
-        match lines.next() {
-            Some(Ok(line)) => heap.push(KeyedCmp {
+        if let Some(Ok(line)) = lines.next() {
+            heap.push(KeyedCmp {
                 key: Reverse(line),
                 value: index,
-            }),
-            _ => {}
+            })
         }
     }
 
-    loop {
-        match heap.pop() {
-            Some(content) => {
-                let line = content.key.0;
-                let source_index = content.value;
+    heap.sort();
 
-                out_file
-                    .write_all(line.as_bytes())
-                    .expect("should be able to write");
-                out_file.write_all(b"\n").expect("should be able to write");
+    while let Some(content) = heap.pop() {
+        let line = content.key.0;
+        let source_index = content.value;
 
-                match readers[source_index].next() {
-                    Some(Ok(line)) => {
-                        heap.push(KeyedCmp {
-                            key: Reverse(line),
-                            value: source_index,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-            None => {
-                break;
+        out_file
+            .write_all(line.as_bytes())
+            .expect("should be able to write");
+        out_file.write_all(b"\n").expect("should be able to write");
+
+        if let Some(Ok(line)) = readers[source_index].next() {
+            let new_element = KeyedCmp {
+                key: Reverse(line),
+                value: source_index,
+            };
+            match heap.binary_search(&new_element) {
+                Ok(index) => {}
+                Err(index) => heap.insert(index, new_element),
             }
         }
     }
+    out_file.into_temp_path()
+}
 
-    out_file
+#[test]
+fn output_matches_gnu_sort() {
+    const REQUIRED: &[u8] = include_bytes!("../gnu-sort.output");
+
+    main();
+
+    let reader = std::fs::File::open("sorted-output.txt").unwrap();
+    let act_reader = BufReader::new(reader);
+    let req_reader = BufReader::new(std::io::Cursor::new(REQUIRED));
+    let mut act_lines = act_reader.lines();
+
+    for (index, req_line) in req_reader.lines().enumerate() {
+        let act_line = act_lines.next().unwrap().unwrap();
+        let req_line = req_line.unwrap();
+        assert_eq!(req_line, act_line, "The line {index} should be equal");
+    }
 }
