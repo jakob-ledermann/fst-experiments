@@ -107,9 +107,15 @@ impl<TKey: Ord, TValue> Ord for KeyedCmp<TKey, TValue> {
 }
 
 fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> TempPath {
+    let elements_per_source = usize::max(1024 / sources.len(), 1);
+    info!(
+        "Loading {} elements per file for merging",
+        elements_per_source
+    );
+
     let out_file_path = NamedTempFile::new_in(target_folder).expect("Could not create target file");
 
-    let mut out_file = out_file_path;
+    let mut out_file = BufWriter::new(out_file_path);
     let mut readers: Vec<Lines<_>> = sources
         .iter()
         .map(|x| {
@@ -119,14 +125,20 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> TempPath {
         })
         .collect();
 
-    let mut heap = Vec::with_capacity(sources.len());
+    let mut heap = Vec::with_capacity(elements_per_source * sources.len());
+    let mut element_counter: Vec<usize> = vec![0; sources.len()];
 
     for (index, lines) in readers.iter_mut().enumerate() {
-        if let Some(Ok(line)) = lines.next() {
+        while let Some(Ok(line)) = lines.next() {
             heap.push(KeyedCmp {
                 key: Reverse(line),
                 value: index,
-            })
+            });
+
+            element_counter[index] += 1;
+            if element_counter[index] >= elements_per_source {
+                break;
+            }
         }
     }
 
@@ -141,18 +153,33 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> TempPath {
             .expect("should be able to write");
         out_file.write_all(b"\n").expect("should be able to write");
 
-        if let Some(Ok(line)) = readers[source_index].next() {
-            let new_element = KeyedCmp {
-                key: Reverse(line),
-                value: source_index,
-            };
-            match heap.binary_search(&new_element) {
-                Ok(index) => {}
-                Err(index) => heap.insert(index, new_element),
+        element_counter[source_index] -= 1;
+
+        if element_counter[source_index] == 0 {
+            // Refill the buffer once the element_counter for one reaches zero
+            info!("refill the buffer");
+            for (source_index, count) in element_counter
+                .iter_mut()
+                .enumerate()
+                .filter(|(_, &mut count)| count < elements_per_source)
+            {
+                while let Some(Ok(line)) = readers[source_index].next() {
+                    let new_element = KeyedCmp {
+                        key: Reverse(line),
+                        value: source_index,
+                    };
+                    heap.push(new_element);
+                    *count += 1;
+                    if *count >= elements_per_source {
+                        break;
+                    }
+                }
             }
+            heap.sort();
+            info!("buffer filled and sorted");
         }
     }
-    out_file.into_temp_path()
+    out_file.into_inner().expect("Could not access the inner file").into_temp_path()
 }
 
 #[test]
