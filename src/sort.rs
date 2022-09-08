@@ -17,12 +17,14 @@ fn main() {
     let reader = BufReader::new(input_file);
     let tmp_dir = tempfile::tempdir_in("./temp").expect("Can not create temporary folder");
 
+    let limit = 10 * 1024;
+
     info!("Splitting the original file into sorted runs");
-    let mut runs = split_into_sorted_runs(reader, tmp_dir.path());
+    let mut runs = split_into_sorted_runs(reader, tmp_dir.path(), limit);
 
     let final_file = if runs.len() > 1 {
         info!("Merging {} files", runs.len());
-        merge_runs(&runs, tmp_dir.path())
+        merge_runs(&runs, tmp_dir.path(), limit)
     } else {
         info!("Could merge completly in memory");
         runs.pop().expect("Should have at least one run")
@@ -37,8 +39,8 @@ fn main() {
     ));
 }
 
-fn split_into_sorted_runs(source: impl BufRead + std::io::Seek, folder: &Path) -> Vec<TempPath> {
-    let mut waiting_buffer = Vec::with_capacity(1024);
+fn split_into_sorted_runs(source: impl BufRead + std::io::Seek, folder: &Path, limit: usize) -> Vec<TempPath> {
+    let mut waiting_buffer = Vec::with_capacity(limit);
     let mut run_count = 1;
     let mut result = Vec::new();
     let out_file_path = NamedTempFile::new_in(folder).expect("Could not create run_file");
@@ -106,8 +108,8 @@ impl<TKey: Ord, TValue> Ord for KeyedCmp<TKey, TValue> {
     }
 }
 
-fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> TempPath {
-    let elements_per_source = usize::max(1024 / sources.len(), 1);
+fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path, limit: usize) -> TempPath {
+    let elements_per_source = usize::max(limit / sources.len(), 1);
     info!(
         "Loading {} elements per file for merging",
         elements_per_source
@@ -157,7 +159,7 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> TempPath {
 
         if element_counter[source_index] == 0 {
             // Refill the buffer once the element_counter for one reaches zero
-            info!("refill the buffer");
+            tracing::debug!("refill the buffer");
             for (source_index, count) in element_counter
                 .iter_mut()
                 .enumerate()
@@ -176,7 +178,7 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path) -> TempPath {
                 }
             }
             heap.sort();
-            info!("buffer filled and sorted");
+            tracing::debug!("buffer filled and sorted");
         }
     }
     out_file.into_inner().expect("Could not access the inner file").into_temp_path()
