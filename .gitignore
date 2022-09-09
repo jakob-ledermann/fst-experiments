@@ -2,3 +2,8 @@
 /temp
 *.svg
 *
+!/src
+!Cargo.lock
+!Cargo.toml
+!Readme.md
+!.gitignore

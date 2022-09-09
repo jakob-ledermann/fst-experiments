@@ -1,7 +1,10 @@
+#![feature(slice_as_chunks)]
 use std::{
     cmp::{Ordering, Reverse},
-    io::{BufRead, BufReader, BufWriter, Lines, Seek, Write},
+    io::{BufRead, BufReader, BufWriter, Lines, Read, Seek, Write},
+    num::ParseIntError,
     path::Path,
+    str::FromStr,
 };
 
 use tempfile::{NamedTempFile, TempPath};
@@ -38,6 +41,98 @@ fn main() {
     ));
 }
 
+struct Entry {
+    hash: [u32; 5], // 160 bits / 8 / 4 = 5
+    count: u32,
+}
+
+impl FromStr for Entry {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split_terminator(":").collect();
+        let hash: Vec<u32> = parts[0]
+            .as_bytes()
+            .chunks_exact(8)
+            .map(|x| {
+                u32::from_str_radix(std::str::from_utf8(x).expect("Should be valid utf8"), 16)
+                    .expect("Should be a valid hex string")
+            })
+            .collect();
+        let count = u32::from_str_radix(parts[1], 10)?;
+        let mut hash_array = [0u32; 5];
+
+        hash_array.copy_from_slice(hash.as_slice());
+
+        Ok(Self {
+            hash: hash_array,
+            count,
+        })
+    }
+}
+
+impl Entry {
+    fn to_le_bytes(self) -> [u8; 6 * std::mem::size_of::<u32>()] {
+        let mut buffer = [0u8; 6 * std::mem::size_of::<u32>()];
+        self.hash
+            .iter()
+            .map(|x| x.to_le_bytes())
+            .enumerate()
+            .for_each(|(idx, x)| {
+                buffer[idx * std::mem::size_of::<u32>()..(idx + 1) * std::mem::size_of::<u32>()]
+                    .copy_from_slice(x.as_slice())
+            });
+        buffer[20..].copy_from_slice(self.count.to_le_bytes().as_slice());
+        buffer
+    }
+
+    fn from_le_bytes(bytes: &[u8; 6 * std::mem::size_of::<u32>()]) -> Self {
+        let vec: Vec<u32> = bytes
+            .as_chunks::<{ std::mem::size_of::<u32>() }>()
+            .0
+            .iter()
+            .map(|x| u32::from_le_bytes(*x))
+            .collect();
+        let mut hash = [0u32; 5];
+        hash.copy_from_slice(&vec[0..5]);
+        let count = vec[5];
+        Self { hash, count }
+    }
+}
+
+impl PartialEq for Entry {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+    }
+}
+
+impl Eq for Entry {}
+
+impl PartialOrd for Entry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Entry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.hash.cmp(&other.hash)
+    }
+}
+
+impl ToString for Entry {
+    fn to_string(&self) -> String {
+        let mut result = String::with_capacity(50);
+
+        self.hash
+            .iter()
+            .for_each(|x| write!(&mut result as &mut dyn std::fmt::Write, "{:08X}", x).unwrap());
+        write!(&mut result as &mut dyn std::fmt::Write, ":{}", self.count);
+
+        result
+    }
+}
+
 fn split_into_sorted_runs(
     source: impl BufRead + std::io::Seek,
     folder: &Path,
@@ -50,15 +145,15 @@ fn split_into_sorted_runs(
 
     for line in iterator {
         let line = line.unwrap();
-        waiting_buffer.push(line);
+        let entry: Entry = line.parse().expect("Should be parsable");
+        waiting_buffer.push(entry);
 
         if waiting_buffer.len() >= waiting_buffer.capacity() - 1 {
             let file = NamedTempFile::new_in(folder).unwrap();
             let mut old_file = BufWriter::new(file);
-            waiting_buffer.sort();
+            waiting_buffer.sort_unstable();
             for element in waiting_buffer.drain(..) {
-                old_file.write_all(element.as_bytes()).unwrap();
-                old_file.write_all(b"\n").unwrap();
+                old_file.write_all(&element.to_le_bytes()).unwrap();
             }
             old_file.flush().unwrap();
             result.push(old_file.into_inner().unwrap().into_temp_path());
@@ -69,8 +164,7 @@ fn split_into_sorted_runs(
     let mut old_file = BufWriter::new(file);
     waiting_buffer.sort();
     for element in waiting_buffer.drain(..) {
-        old_file.write_all(element.as_bytes()).unwrap();
-        old_file.write_all(b"\n").unwrap();
+        old_file.write_all(&element.to_le_bytes()).unwrap();
     }
     old_file.flush().unwrap();
     result.push(old_file.into_inner().unwrap().into_temp_path());
@@ -102,6 +196,22 @@ impl<TKey: Ord, TValue> Ord for KeyedCmp<TKey, TValue> {
     }
 }
 
+struct Entries<T: Read> {
+    reader: T,
+}
+
+impl<T: Read> Iterator for Entries<T> {
+    type Item = Entry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut buffer = [0u8; 6 * std::mem::size_of::<u32>()];
+        match self.reader.read_exact(buffer.as_mut_slice()) {
+            Ok(_) => Some(Entry::from_le_bytes(&buffer)),
+            Err(_) => None,
+        }
+    }
+}
+
 fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path, limit: usize) -> TempPath {
     let elements_per_source = usize::max(limit / sources.len(), 1);
     info!(
@@ -112,12 +222,12 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path, limit: usize)
     let out_file_path = NamedTempFile::new_in(target_folder).expect("Could not create target file");
 
     let mut out_file = BufWriter::new(out_file_path);
-    let mut readers: Vec<Lines<_>> = sources
+    let mut readers: Vec<Entries<_>> = sources
         .iter()
         .map(|x| {
             let reader = std::fs::File::open(x).expect("Could not open source file");
             let reader = BufReader::new(reader);
-            reader.lines()
+            Entries { reader }
         })
         .collect();
 
@@ -125,9 +235,9 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path, limit: usize)
     let mut element_counter: Vec<usize> = vec![0; sources.len()];
 
     for (index, lines) in readers.iter_mut().enumerate() {
-        while let Some(Ok(line)) = lines.next() {
+        while let Some(entry) = lines.next() {
             heap.push(KeyedCmp {
-                key: Reverse(line),
+                key: Reverse(entry),
                 value: index,
             });
 
@@ -145,7 +255,7 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path, limit: usize)
         let source_index = content.value;
 
         out_file
-            .write_all(line.as_bytes())
+            .write_all(line.to_string().as_bytes())
             .expect("should be able to write");
         out_file.write_all(b"\n").expect("should be able to write");
 
@@ -159,9 +269,9 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path, limit: usize)
                 .enumerate()
                 .filter(|(_, &mut count)| count < elements_per_source)
             {
-                while let Some(Ok(line)) = readers[source_index].next() {
+                while let Some(entry) = readers[source_index].next() {
                     let new_element = KeyedCmp {
-                        key: Reverse(line),
+                        key: Reverse(entry),
                         value: source_index,
                     };
                     heap.push(new_element);
