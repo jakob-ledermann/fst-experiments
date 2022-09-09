@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader};
 fn main() {
     let sorted_input =
-        std::fs::File::open("pwned-passwords.sorted.txt").expect("Should contain exactly one file");
+        std::fs::File::open("sorted-output.txt").expect("Should contain exactly one file");
     let file =
         std::fs::File::create("pwned-passwords.fst").expect("Can't create pwned-passwords.fst");
     let mut fst = fst::MapBuilder::new(file).expect("Could not create FST");

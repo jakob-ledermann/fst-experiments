@@ -1,6 +1,5 @@
 use std::{
     cmp::{Ordering, Reverse},
-    collections::BinaryHeap,
     io::{BufRead, BufReader, BufWriter, Lines, Seek, Write},
     path::Path,
 };
@@ -39,24 +38,23 @@ fn main() {
     ));
 }
 
-fn split_into_sorted_runs(source: impl BufRead + std::io::Seek, folder: &Path, limit: usize) -> Vec<TempPath> {
+fn split_into_sorted_runs(
+    source: impl BufRead + std::io::Seek,
+    folder: &Path,
+    limit: usize,
+) -> Vec<TempPath> {
     let mut waiting_buffer = Vec::with_capacity(limit);
-    let mut run_count = 1;
     let mut result = Vec::new();
-    let out_file_path = NamedTempFile::new_in(folder).expect("Could not create run_file");
-    let mut out_file = BufWriter::new(out_file_path);
-    let mut last_written: Option<String> = None;
-    let mut iterator = source.lines();
-    let mut input_file_empty = false;
+
+    let iterator = source.lines();
 
     for line in iterator {
         let line = line.unwrap();
         waiting_buffer.push(line);
 
         if waiting_buffer.len() >= waiting_buffer.capacity() - 1 {
-            run_count += 1;
             let file = NamedTempFile::new_in(folder).unwrap();
-            let mut old_file = std::mem::replace(&mut out_file, BufWriter::new(file));
+            let mut old_file = BufWriter::new(file);
             waiting_buffer.sort();
             for element in waiting_buffer.drain(..) {
                 old_file.write_all(element.as_bytes()).unwrap();
@@ -67,19 +65,15 @@ fn split_into_sorted_runs(source: impl BufRead + std::io::Seek, folder: &Path, l
         }
     }
 
+    let file = NamedTempFile::new_in(folder).unwrap();
+    let mut old_file = BufWriter::new(file);
     waiting_buffer.sort();
-    for element in waiting_buffer {
-        out_file.write_all(element.as_bytes()).unwrap();
-        out_file.write_all(b"\n").unwrap();
+    for element in waiting_buffer.drain(..) {
+        old_file.write_all(element.as_bytes()).unwrap();
+        old_file.write_all(b"\n").unwrap();
     }
-    out_file.flush().unwrap();
-
-    result.push(
-        out_file
-            .into_inner()
-            .expect("Could not unwrap BufWriter")
-            .into_temp_path(),
-    );
+    old_file.flush().unwrap();
+    result.push(old_file.into_inner().unwrap().into_temp_path());
     result
 }
 
@@ -181,7 +175,10 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path, limit: usize)
             tracing::debug!("buffer filled and sorted");
         }
     }
-    out_file.into_inner().expect("Could not access the inner file").into_temp_path()
+    out_file
+        .into_inner()
+        .expect("Could not access the inner file")
+        .into_temp_path()
 }
 
 #[test]

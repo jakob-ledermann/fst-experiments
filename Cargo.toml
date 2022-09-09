@@ -15,5 +15,9 @@ tracing-subscriber = "0.3.15"
 name = "sort"
 path = "src/sort.rs"
 
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
 [profile.release]
 debug = true
