@@ -10,13 +10,13 @@ use tracing::info;
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let input_file = std::fs::File::open("pwned-passwords-sha1-ordered-by-count-v8.part.txt")
+    let input_file = std::fs::File::open("pwned-passwords-sha1-ordered-by-count-v8.txt")
         .expect("Could not open input file.");
 
     let reader = BufReader::new(input_file);
     let tmp_dir = tempfile::tempdir_in("./temp").expect("Can not create temporary folder");
 
-    let limit = 10 * 1024;
+    let limit = 1024 * 1024 * 100;
 
     info!("Splitting the original file into sorted runs");
     let mut runs = split_into_sorted_runs(reader, tmp_dir.path(), limit);

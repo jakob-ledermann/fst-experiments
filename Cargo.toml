@@ -16,8 +16,12 @@ name = "sort"
 path = "src/sort.rs"
 
 [[bin]]
-name = "main"
-path = "src/main.rs"
+name = "generate"
+path = "src/fst_generate.rs"
+
+[[bin]]
+name = "query"
+path = "src/fst_query.rs"
 
 [profile.release]
 debug = true
