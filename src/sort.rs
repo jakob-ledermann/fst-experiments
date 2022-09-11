@@ -1,6 +1,6 @@
 use std::{
     cmp::{Ordering, Reverse},
-    io::{BufRead, BufReader, BufWriter, Lines, Seek, Write},
+    io::{BufRead, BufReader, BufWriter, Lines, Read, Seek, Write},
     path::Path,
 };
 
@@ -14,13 +14,17 @@ fn main() {
         .expect("Could not open input file.");
 
     let reader = BufReader::new(input_file);
-    let tmp_dir = tempfile::tempdir_in("./temp").expect("Can not create temporary folder");
 
     let limit = 1024 * 1024 * 100;
 
+    sort(reader, limit);
+}
+
+fn sort(reader: impl BufRead, limit: usize) {
+    let tmp_dir = tempfile::tempdir_in("./temp").expect("Can not create temporary folder");
+
     info!("Splitting the original file into sorted runs");
     let mut runs = split_into_sorted_runs(reader, tmp_dir.path(), limit);
-
     let final_file = if runs.len() > 1 {
         info!("Merging {} files", runs.len());
         merge_runs(&runs, tmp_dir.path(), limit)
@@ -28,7 +32,6 @@ fn main() {
         info!("Could merge completly in memory");
         runs.pop().expect("Should have at least one run")
     };
-
     let path = final_file
         .keep()
         .expect("Should be able to persist the final file");
@@ -38,11 +41,7 @@ fn main() {
     ));
 }
 
-fn split_into_sorted_runs(
-    source: impl BufRead + std::io::Seek,
-    folder: &Path,
-    limit: usize,
-) -> Vec<TempPath> {
+fn split_into_sorted_runs(source: impl BufRead, folder: &Path, limit: usize) -> Vec<TempPath> {
     let mut waiting_buffer = Vec::with_capacity(limit);
     let mut result = Vec::new();
 
@@ -184,8 +183,9 @@ fn merge_runs<T: AsRef<Path>>(sources: &[T], target_folder: &Path, limit: usize)
 #[test]
 fn output_matches_gnu_sort() {
     const REQUIRED: &[u8] = include_bytes!("../gnu-sort.output");
+    const INPUT: &[u8] = include_bytes!("../pwned-passwords-sha1-ordered-by-count-v8.part.txt");
 
-    main();
+    sort(std::io::Cursor::new(INPUT), 1024 * 10);
 
     let reader = std::fs::File::open("sorted-output.txt").unwrap();
     let act_reader = BufReader::new(reader);
@@ -197,4 +197,9 @@ fn output_matches_gnu_sort() {
         let req_line = req_line.unwrap();
         assert_eq!(req_line, act_line, "The line {index} should be equal");
     }
+}
+
+#[test]
+fn test_size() {
+    assert_eq!(17000494749432868067, usize::MAX)
 }
